@@ -1,0 +1,17 @@
+{
+  "name": "Atlas Cube Coach",
+  "short_name": "Cube Coach",
+  "description": "Record and analyse solves from a Bluetooth smart cube.",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#0d1018",
+  "theme_color": "#0d1018",
+  "icons": [
+    {
+      "src": "./icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
