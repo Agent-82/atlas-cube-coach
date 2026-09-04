@@ -41,6 +41,7 @@ const state = {
   cubeFeedbackTimer: null,
   armed: false,
   running: false,
+  solveProfileId: null,
   startedAt: null,
   moves: [],
   lastMove: null,
@@ -681,6 +682,7 @@ function armSolve() {
 function startOnFirstMove() {
   state.armed = false;
   state.running = true;
+  state.solveProfileId = state.activeProfileId;
   state.startedAt = now();
   els.recordingState.textContent = 'RECORDING';
   els.recordingState.className = 'rec-state recording';
@@ -758,6 +760,7 @@ function updateMoveStream() {
 
 function finishSolve(reason = 'manual') {
   if (!state.running || !state.moves.length) return;
+  const solveProfileId = state.solveProfileId || state.activeProfileId;
   state.running = false;
   state.armed = false;
   cancelAnimationFrame(state.timerHandle);
@@ -766,7 +769,7 @@ function finishSolve(reason = 'manual') {
   const stats = calculateStats(state.moves, durationMs);
   const solve = {
     id: crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`,
-    profileId: state.activeProfileId,
+    profileId: solveProfileId,
     createdAt: new Date().toISOString(),
     reason,
     deviceName: state.deviceName || (state.demoRunning ? 'Demo cube' : 'Unknown'),
@@ -785,6 +788,7 @@ function finishSolve(reason = 'manual') {
   els.armBtn.textContent = 'Arm another';
   els.armBtn.disabled = false;
   els.finishBtn.disabled = true;
+  state.solveProfileId = null;
   state.demoRunning = false;
   logDiagnostic('Solve saved', { reason, durationMs: Math.round(durationMs), moves: stats.moveCount });
 
@@ -795,6 +799,7 @@ function finishSolve(reason = 'manual') {
 function resetCurrentSolve(resetUi = true) {
   state.armed = false;
   state.running = false;
+  state.solveProfileId = null;
   state.startedAt = null;
   state.moves = [];
   state.lastMove = null;
