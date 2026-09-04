@@ -2,7 +2,31 @@ import './styles.css';
 import { connectSmartCube } from 'smartcube-web-bluetooth';
 
 const STORAGE_KEY = 'atlasCubeCoach.solves.v1';
+const PROFILES_KEY = 'atlasCubeCoach.profiles.v1';
+const ACTIVE_PROFILE_KEY = 'atlasCubeCoach.activeProfile.v1';
 const SOLVED_FACELETS = 'UUUUUUUUURRRRRRRRRFFFFFFFFFDDDDDDDDDLLLLLLLLLBBBBBBBBB';
+const MATTHEW_PROFILE_ID = 'profile-matthew';
+const DEFAULT_PROFILE = {
+  id: MATTHEW_PROFILE_ID,
+  name: 'Matthew',
+  method: 'Atlas 8-step beginner',
+  experience: 'Learning algorithms',
+  helpLevel: 'Mostly analyse',
+  progress: {
+    step1Daisy: 'comfortable',
+    step2WhiteCross: 'comfortable',
+    step3WhiteCorners: 'comfortable',
+    step4MiddleLayer: 'comfortable',
+    step5YellowCross: 'nearly memorised',
+    step6YellowCrossSideColours: 'learning / uses notes',
+    step7PositionYellowCorners: 'learning / uses notes',
+    step8OrientYellowCorners: 'learning / uses notes',
+    currentFocus: 'Remove note dependence and internalise the later algorithms'
+  },
+  createdAt: '2026-09-04T00:00:00.000Z'
+};
+
+const initialData = initializeLocalProfiles();
 
 const state = {
   connection: null,
@@ -21,7 +45,9 @@ const state = {
   moves: [],
   lastMove: null,
   timerHandle: null,
-  solves: loadSolves(),
+  solves: initialData.solves,
+  profiles: initialData.profiles,
+  activeProfileId: initialData.activeProfileId,
   replaySolveId: null,
   replayIndex: -1,
   diagnostics: [],
@@ -34,11 +60,18 @@ app.innerHTML = `
   <main class="shell">
     <header class="hero">
       <div>
-        <p class="eyebrow">ATLAS LABS · PROTOTYPE 0.1</p>
+        <p class="eyebrow">ATLAS LABS · PROTOTYPE 0.2 · PROFILES</p>
         <h1>Atlas Cube Coach</h1>
         <p class="lede">First make the cube talk. Then make the coaching clever.</p>
       </div>
-      <div class="hero-badge" id="browserBadge">Checking Bluetooth…</div>
+      <div class="hero-actions">
+        <div class="profile-menu">
+          <span class="profile-label">Profile</span>
+          <button class="profile-trigger" id="profileMenuBtn" aria-haspopup="true" aria-expanded="false">Matthew ▾</button>
+          <div class="profile-options" id="profileOptions" hidden></div>
+        </div>
+        <div class="hero-badge" id="browserBadge">Checking Bluetooth…</div>
+      </div>
     </header>
 
     <section class="grid top-grid">
@@ -164,15 +197,64 @@ app.innerHTML = `
       </details>
     </section>
 
+    <div class="modal-backdrop" id="profileModal" hidden>
+      <section class="profile-modal" role="dialog" aria-modal="true" aria-labelledby="profileModalTitle">
+        <div class="card-heading compact">
+          <div>
+            <span class="section-kicker">PROFILE</span>
+            <h2 id="profileModalTitle">Add profile</h2>
+          </div>
+          <button class="ghost small" id="cancelProfileBtn" type="button">Cancel</button>
+        </div>
+        <form id="profileForm" class="profile-form">
+          <label>
+            <span>Name</span>
+            <input id="profileNameInput" name="name" type="text" autocomplete="off" maxlength="40" required />
+          </label>
+          <label>
+            <span>Have you solved a cube before?</span>
+            <select id="profileExperienceInput" name="experience">
+              <option>Never solved</option>
+              <option>Can solve with help</option>
+              <option>Can solve independently</option>
+              <option selected>Learning algorithms</option>
+            </select>
+          </label>
+          <label>
+            <span>What method are you using?</span>
+            <select id="profileMethodInput" name="method">
+              <option selected>Atlas 8-step beginner</option>
+              <option>Another method</option>
+              <option>Not sure</option>
+            </select>
+          </label>
+          <label>
+            <span>How much help do you want from Atlas?</span>
+            <select id="profileHelpInput" name="helpLevel">
+              <option>Teach me everything</option>
+              <option>Coach me when I struggle</option>
+              <option selected>Mostly analyse</option>
+            </select>
+          </label>
+          <p class="form-error" id="profileFormError"></p>
+          <div class="button-row profile-form-actions">
+            <button class="primary" type="submit">Add profile</button>
+          </div>
+        </form>
+      </section>
+    </div>
+
     <footer>
       <span>Atlas Cube Coach · local-first prototype</span>
-      <span>No AI API key required for v0.1</span>
+      <span>No accounts or cloud sync required for v0.2</span>
     </footer>
   </main>
 `;
 
 const els = Object.fromEntries([
-  'browserBadge','statusDot','connectionStatus','batteryStatus','deviceStatus','connectBtn','demoBtn',
+  'browserBadge','profileMenuBtn','profileOptions','profileModal','profileForm','profileNameInput',
+  'profileExperienceInput','profileMethodInput','profileHelpInput','profileFormError','cancelProfileBtn',
+  'statusDot','connectionStatus','batteryStatus','deviceStatus','connectBtn','demoBtn',
   'resetCubeBtn','cubeFeedback',
   'cubeNet','liveMove','faceletText','recordingState','timer','moveCount','tps','longestPause','pauseCount',
   'armBtn','finishBtn','resetBtn','moveStream','historyList','clearHistoryBtn','replayMove','replayTime',
@@ -181,14 +263,74 @@ const els = Object.fromEntries([
 
 function loadSolves() {
   try {
-    return JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+    const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+    return Array.isArray(parsed) ? parsed : [];
   } catch {
     return [];
   }
 }
 
 function saveSolves() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state.solves.slice(0, 100)));
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(state.solves));
+}
+
+function loadProfiles() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(PROFILES_KEY) || '[]');
+    return Array.isArray(parsed) ? parsed.filter(profile => profile?.id && profile?.name) : [];
+  } catch {
+    return [];
+  }
+}
+
+function initializeLocalProfiles() {
+  const solves = loadSolves();
+  const existingProfilesRaw = localStorage.getItem(PROFILES_KEY);
+  let profiles = loadProfiles();
+  let activeProfileId = localStorage.getItem(ACTIVE_PROFILE_KEY);
+
+  if (!existingProfilesRaw || !profiles.length) {
+    profiles = [{ ...DEFAULT_PROFILE, progress: { ...DEFAULT_PROFILE.progress } }];
+    activeProfileId = MATTHEW_PROFILE_ID;
+    localStorage.setItem(PROFILES_KEY, JSON.stringify(profiles));
+    localStorage.setItem(ACTIVE_PROFILE_KEY, activeProfileId);
+
+    let migratedSolves = false;
+    for (const solve of solves) {
+      if (solve && !solve.profileId) {
+        solve.profileId = MATTHEW_PROFILE_ID;
+        migratedSolves = true;
+      }
+    }
+    if (migratedSolves) localStorage.setItem(STORAGE_KEY, JSON.stringify(solves));
+  } else if (!profiles.some(profile => profile.id === activeProfileId)) {
+    activeProfileId = profiles[0].id;
+    localStorage.setItem(ACTIVE_PROFILE_KEY, activeProfileId);
+  }
+
+  return { solves, profiles, activeProfileId };
+}
+
+function saveProfiles() {
+  localStorage.setItem(PROFILES_KEY, JSON.stringify(state.profiles));
+}
+
+function saveActiveProfile() {
+  localStorage.setItem(ACTIVE_PROFILE_KEY, state.activeProfileId);
+}
+
+function createProfileId(name) {
+  const base = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'profile';
+  const suffix = crypto.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return `profile-${base}-${suffix}`;
+}
+
+function getActiveProfile() {
+  return state.profiles.find(profile => profile.id === state.activeProfileId) || state.profiles[0];
+}
+
+function getVisibleSolves() {
+  return state.solves.filter(solve => solve.profileId === state.activeProfileId);
 }
 
 function formatTime(ms) {
@@ -269,6 +411,93 @@ function updateResetControls() {
       }
     }
   }
+}
+
+function renderProfileMenu() {
+  const activeProfile = getActiveProfile();
+  if (!activeProfile) return;
+  els.profileMenuBtn.textContent = `${activeProfile.name} ▾`;
+  els.profileOptions.innerHTML = `
+    ${state.profiles.map(profile => `
+      <button class="profile-option ${profile.id === state.activeProfileId ? 'active' : ''}" type="button" data-profile-id="${profile.id}">
+        <span>${escapeHtml(profile.name)}</span>
+        <small>${escapeHtml(profile.experience)}</small>
+      </button>
+    `).join('')}
+    <button class="profile-option add-profile-option" type="button" data-add-profile="true">+ Add profile</button>
+  `;
+
+  els.profileOptions.querySelectorAll('[data-profile-id]').forEach(button => {
+    button.addEventListener('click', () => switchProfile(button.dataset.profileId));
+  });
+  els.profileOptions.querySelector('[data-add-profile]')?.addEventListener('click', openProfileForm);
+}
+
+function setProfileMenuOpen(open) {
+  els.profileOptions.hidden = !open;
+  els.profileMenuBtn.setAttribute('aria-expanded', String(open));
+}
+
+function switchProfile(profileId) {
+  if (!state.profiles.some(profile => profile.id === profileId)) return;
+  state.activeProfileId = profileId;
+  saveActiveProfile();
+  state.replaySolveId = null;
+  state.replayIndex = -1;
+  setProfileMenuOpen(false);
+  renderProfileMenu();
+  renderHistory();
+  renderReplay();
+  logDiagnostic('Profile switched', { profileId, name: getActiveProfile()?.name });
+}
+
+function openProfileForm() {
+  setProfileMenuOpen(false);
+  els.profileForm.reset();
+  els.profileExperienceInput.value = 'Learning algorithms';
+  els.profileMethodInput.value = 'Atlas 8-step beginner';
+  els.profileHelpInput.value = 'Mostly analyse';
+  els.profileFormError.textContent = '';
+  els.profileModal.hidden = false;
+  els.profileNameInput.focus();
+}
+
+function closeProfileForm() {
+  els.profileModal.hidden = true;
+  els.profileForm.reset();
+  els.profileNameInput.value = '';
+  els.profileFormError.textContent = '';
+}
+
+function addProfile(event) {
+  event.preventDefault();
+  const name = els.profileNameInput.value.trim();
+  if (!name) {
+    els.profileFormError.textContent = 'Enter a profile name.';
+    els.profileNameInput.focus();
+    return;
+  }
+
+  const profile = {
+    id: createProfileId(name),
+    name,
+    experience: els.profileExperienceInput.value,
+    method: els.profileMethodInput.value,
+    helpLevel: els.profileHelpInput.value,
+    progress: {},
+    createdAt: new Date().toISOString()
+  };
+  state.profiles.push(profile);
+  state.activeProfileId = profile.id;
+  saveProfiles();
+  saveActiveProfile();
+  state.replaySolveId = null;
+  state.replayIndex = -1;
+  closeProfileForm();
+  renderProfileMenu();
+  renderHistory();
+  renderReplay();
+  logDiagnostic('Profile added', { profileId: profile.id, name: profile.name });
 }
 
 function detectBluetoothSupport() {
@@ -537,6 +766,7 @@ function finishSolve(reason = 'manual') {
   const stats = calculateStats(state.moves, durationMs);
   const solve = {
     id: crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`,
+    profileId: state.activeProfileId,
     createdAt: new Date().toISOString(),
     reason,
     deviceName: state.deviceName || (state.demoRunning ? 'Demo cube' : 'Unknown'),
@@ -546,7 +776,6 @@ function finishSolve(reason = 'manual') {
   };
 
   state.solves.unshift(solve);
-  state.solves = state.solves.slice(0, 100);
   saveSolves();
 
   els.timer.textContent = formatTime(durationMs);
@@ -589,13 +818,15 @@ function resetCurrentSolve(resetUi = true) {
 }
 
 function renderHistory() {
-  if (!state.solves.length) {
-    els.historyList.innerHTML = '<div class="empty-panel">No solves yet. Run the demo or connect the cube.</div>';
+  const visibleSolves = getVisibleSolves();
+  const activeProfile = getActiveProfile();
+  if (!visibleSolves.length) {
+    els.historyList.innerHTML = `<div class="empty-panel">No solves yet for ${escapeHtml(activeProfile?.name || 'this profile')}.</div>`;
     return;
   }
-  els.historyList.innerHTML = state.solves.map((solve, index) => `
+  els.historyList.innerHTML = visibleSolves.map((solve, index) => `
     <button class="history-item ${solve.id === state.replaySolveId ? 'selected' : ''}" data-solve-id="${solve.id}">
-      <span class="history-rank">#${state.solves.length - index}</span>
+      <span class="history-rank">#${visibleSolves.length - index}</span>
       <span class="history-main">
         <strong>${formatTime(solve.durationMs)}</strong>
         <small>${new Date(solve.createdAt).toLocaleString()}</small>
@@ -610,7 +841,7 @@ function renderHistory() {
 }
 
 function selectReplay(id) {
-  const solve = state.solves.find(s => s.id === id);
+  const solve = getVisibleSolves().find(s => s.id === id);
   if (!solve) return;
   state.replaySolveId = id;
   state.replayIndex = solve.moves.length ? solve.moves.length - 1 : -1;
@@ -623,7 +854,7 @@ function selectReplay(id) {
 }
 
 function renderReplay() {
-  const solve = state.solves.find(s => s.id === state.replaySolveId);
+  const solve = getVisibleSolves().find(s => s.id === state.replaySolveId);
   if (!solve) {
     els.replayMove.textContent = '—';
     els.replayTime.textContent = 'Select a saved solve';
@@ -751,13 +982,32 @@ els.resetBtn.addEventListener('click', () => {
   logDiagnostic('Current solve reset');
 });
 els.clearHistoryBtn.addEventListener('click', () => {
-  if (!state.solves.length) return;
-  if (!confirm('Delete all locally saved solves?')) return;
-  state.solves = [];
+  const activeProfile = getActiveProfile();
+  const visibleSolves = getVisibleSolves();
+  if (!visibleSolves.length) return;
+  if (!confirm(`Delete locally saved solves for ${activeProfile?.name || 'this profile'}?`)) return;
+  state.solves = state.solves.filter(solve => solve.profileId !== state.activeProfileId);
   state.replaySolveId = null;
   saveSolves();
   renderHistory();
   renderReplay();
+});
+els.profileMenuBtn.addEventListener('click', () => {
+  setProfileMenuOpen(els.profileOptions.hidden);
+});
+els.profileForm.addEventListener('submit', addProfile);
+els.cancelProfileBtn.addEventListener('click', closeProfileForm);
+els.profileModal.addEventListener('click', event => {
+  if (event.target === els.profileModal) closeProfileForm();
+});
+document.addEventListener('click', event => {
+  if (!els.profileOptions.hidden && !event.target.closest('.profile-menu')) setProfileMenuOpen(false);
+});
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape') {
+    setProfileMenuOpen(false);
+    if (!els.profileModal.hidden) closeProfileForm();
+  }
 });
 els.replaySlider.addEventListener('input', event => {
   state.replayIndex = Number(event.target.value);
@@ -779,6 +1029,7 @@ els.clearDiagnosticsBtn.addEventListener('click', () => {
 });
 
 renderCube(SOLVED_FACELETS);
+renderProfileMenu();
 renderHistory();
 renderReplay();
 detectBluetoothSupport();
