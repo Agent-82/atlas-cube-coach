@@ -9,6 +9,7 @@
     "preview": "vite preview --host 0.0.0.0"
   },
   "dependencies": {
+    "cubing": "^0.63.4",
     "smartcube-web-bluetooth": "github:poliva/smartcube-web-bluetooth"
   },
   "devDependencies": {

@@ -1,6 +1,17 @@
 import './styles.css';
 import { connectSmartCube } from 'smartcube-web-bluetooth';
 import { detectAtlasStage } from './stageRecognition.js';
+import {
+  advanceReplayClock,
+  advanceReplayPreroll,
+  captureStartFacelets,
+  createReplayPrerollSnapshot,
+  createReplaySnapshot,
+  getReplayEligibility,
+  getReplayPrerollDuration,
+  movesToAlg,
+  timeForMoveIndex
+} from './replayLogic.js';
 
 const STORAGE_KEY = 'atlasCubeCoach.solves.v1';
 const PROFILES_KEY = 'atlasCubeCoach.profiles.v1';
@@ -44,6 +55,7 @@ const state = {
   armed: false,
   running: false,
   solveProfileId: null,
+  solveStartFacelets: null,
   startedAt: null,
   moves: [],
   lastMove: null,
@@ -56,6 +68,15 @@ const state = {
   stageRecognitionAvailableLogged: false,
   replaySolveId: null,
   replayIndex: -1,
+  reviewSolveId: null,
+  reviewPlayer: null,
+  reviewPhase: 'recorded',
+  reviewPrerollMs: 0,
+  reviewPlaying: false,
+  reviewTimeMs: 0,
+  reviewSpeed: 1,
+  reviewAnimationHandle: null,
+  reviewLastFrameAt: null,
   diagnostics: [],
   demoRunning: false
 };
@@ -66,7 +87,7 @@ app.innerHTML = `
   <main class="shell">
     <header class="hero">
       <div>
-        <p class="eyebrow">ATLAS LABS · PROTOTYPE 0.2B · STAGE RECOGNITION</p>
+        <p class="eyebrow">ATLAS LABS · PROTOTYPE 0.3A · SOLVE REPLAY</p>
         <h1>Atlas Cube Coach</h1>
         <p class="lede">First make the cube talk. Then make the coaching clever.</p>
       </div>
@@ -156,6 +177,7 @@ app.innerHTML = `
       <div class="button-row recorder-buttons">
         <button class="primary" id="armBtn">Arm solve</button>
         <button class="secondary" id="finishBtn" disabled>Finish & save</button>
+        <button class="secondary" id="reviewSolveBtn" hidden>▶ Review solve</button>
         <button class="ghost" id="resetBtn">Reset</button>
       </div>
 
@@ -255,6 +277,41 @@ app.innerHTML = `
       </section>
     </div>
 
+    <div class="modal-backdrop replay-backdrop" id="replayModal" hidden>
+      <section class="solve-replay-modal" role="dialog" aria-modal="true" aria-labelledby="solveReplayTitle">
+        <div class="replay-header">
+          <div>
+            <span class="section-kicker">SOLVE REVIEW</span>
+            <h2 id="solveReplayTitle">Solve Replay</h2>
+            <p id="reviewMeta">Select a solve to review.</p>
+          </div>
+          <button class="ghost small" id="closeReplayBtn" type="button">Close</button>
+        </div>
+        <div class="twisty-wrap" id="twistyWrap"></div>
+        <div class="review-status">
+          <strong id="reviewMoveLabel">Move 0 of 0</strong>
+          <span id="reviewTimeLabel">0:00.000 / 0:00.000</span>
+        </div>
+        <input id="reviewScrubber" class="replay-slider" type="range" min="0" max="0" value="0" step="1" />
+        <div class="review-controls">
+          <button class="secondary" id="reviewRestartBtn" type="button">|◀ Restart</button>
+          <button class="secondary" id="reviewPrevBtn" type="button">◀ Previous move</button>
+          <button class="primary" id="reviewPlayBtn" type="button">▶ Play</button>
+          <button class="secondary" id="reviewNextBtn" type="button">▶| Next move</button>
+          <button class="ghost" id="reviewStopBtn" type="button">■ Stop</button>
+          <select id="reviewSpeedSelect" aria-label="Playback speed">
+            <option value="0.5">0.5×</option>
+            <option value="1" selected>1×</option>
+            <option value="2">2×</option>
+            <option value="4">4×</option>
+          </select>
+        </div>
+        <div class="review-warning" id="reviewWarning" hidden></div>
+        <div class="review-move-strip" id="reviewMoveStrip"></div>
+        <div class="review-stats" id="reviewStats"></div>
+      </section>
+    </div>
+
     <footer>
       <span>Atlas Cube Coach · local-first prototype</span>
       <span>No accounts or cloud sync required for v0.2</span>
@@ -269,8 +326,11 @@ const els = Object.fromEntries([
   'resetCubeBtn','cubeFeedback',
   'cubeNet','liveMove','faceletText','stageCard','stageKicker','stageText','stageNote',
   'recordingState','timer','moveCount','tps','longestPause','pauseCount',
-  'armBtn','finishBtn','resetBtn','moveStream','historyList','clearHistoryBtn','replayMove','replayTime',
+  'armBtn','finishBtn','reviewSolveBtn','resetBtn','moveStream','historyList','clearHistoryBtn','replayMove','replayTime',
   'replaySlider','replaySequence','analysisPreview','diagnosticLog','copyDiagnosticsBtn','clearDiagnosticsBtn'
+  ,'replayModal','solveReplayTitle','closeReplayBtn','twistyWrap','reviewMeta','reviewMoveLabel','reviewTimeLabel','reviewScrubber',
+  'reviewRestartBtn','reviewPrevBtn','reviewPlayBtn','reviewNextBtn','reviewStopBtn','reviewSpeedSelect',
+  'reviewWarning','reviewMoveStrip','reviewStats'
 ].map(id => [id, document.getElementById(id)]));
 
 function loadSolves() {
@@ -580,6 +640,244 @@ function stageIndexForKey(key) {
   return match ? Number(match[1]) : 0;
 }
 
+function getSolveProfileName(solve) {
+  return getProfileById(solve?.profileId)?.name || 'Unknown profile';
+}
+
+function getReviewSolve() {
+  return state.solves.find(solve => solve.id === state.reviewSolveId);
+}
+
+async function ensureReviewPlayer() {
+  if (state.reviewPlayer) return state.reviewPlayer;
+  const { TwistyPlayer } = await import('cubing/twisty');
+  state.reviewPlayer = new TwistyPlayer({
+    puzzle: '3x3x3',
+    alg: '',
+    hintFacelets: 'none',
+    backView: 'side-by-side',
+    background: 'none',
+    controlPanel: 'none',
+    viewerLink: 'none',
+    cameraLatitude: 24,
+    cameraLongitude: 32
+  });
+  els.twistyWrap.replaceChildren(state.reviewPlayer);
+  return state.reviewPlayer;
+}
+
+async function openSolveReplay(solveId) {
+  const solve = state.solves.find(entry => entry.id === solveId);
+  if (!solve) {
+    logDiagnostic('Replay open failed: solve not found', { solveId });
+    return;
+  }
+  state.reviewSolveId = solve.id;
+  resetReviewToStart(solve);
+  state.reviewSpeed = 1;
+  els.reviewSpeedSelect.value = '1';
+  state.reviewPlaying = false;
+  state.reviewLastFrameAt = null;
+  cancelAnimationFrame(state.reviewAnimationHandle);
+  els.replayModal.hidden = false;
+  els.reviewWarning.hidden = false;
+  els.reviewWarning.textContent = 'Loading 3D replay...';
+  renderReviewMoveStrip(solve);
+  renderReviewStats(solve);
+  if (state.reviewPhase === 'preroll') updateReviewPrerollAtTime(state.reviewPrerollMs);
+  else updateReviewAtTime(state.reviewTimeMs);
+  els.closeReplayBtn.focus();
+  logDiagnostic('Replay open requested', { solveId: solve.id, moves: solve.moves?.length || 0, reason: solve.reason });
+  await setupReviewPlayer(solve);
+  if (state.reviewPhase === 'preroll') updateReviewPrerollAtTime(state.reviewPrerollMs);
+  else updateReviewAtTime(state.reviewTimeMs);
+}
+
+function closeSolveReplay() {
+  state.reviewPlaying = false;
+  state.reviewLastFrameAt = null;
+  cancelAnimationFrame(state.reviewAnimationHandle);
+  els.replayModal.hidden = true;
+  updateReviewButtons();
+}
+
+async function setupReviewPlayer(solve) {
+  const eligibility = getReplayEligibility(solve);
+  if (!eligibility.ok) {
+    els.reviewWarning.hidden = false;
+    els.reviewWarning.textContent = eligibility.reason;
+    updateReviewButtons();
+    logDiagnostic('Replay unavailable', { solveId: solve.id, mode: eligibility.mode, reason: eligibility.reason });
+    return;
+  }
+
+  try {
+    const player = await ensureReviewPlayer();
+    player.experimentalSetupAnchor = eligibility.setupAnchor || 'start';
+    player.alg = movesToAlg(solve.moves);
+    player.timestamp = 0;
+    els.reviewWarning.hidden = false;
+    els.reviewWarning.textContent = eligibility.note;
+    logDiagnostic('Replay 3D player ready', { solveId: solve.id, mode: eligibility.mode, setupAnchor: eligibility.setupAnchor });
+  } catch (error) {
+    els.reviewWarning.hidden = false;
+    els.reviewWarning.textContent = `3D replay could not start: ${error?.message || String(error)}`;
+    logDiagnostic('Replay 3D initialisation failed', { message: error?.message || String(error) });
+  }
+  updateReviewButtons();
+}
+
+function updateReviewAtTime(timeMs) {
+  const solve = getReviewSolve();
+  if (!solve) return;
+  const snapshot = createReplaySnapshot(solve, timeMs);
+  state.reviewPhase = 'recorded';
+  const eligibility = getReplayEligibility(solve);
+  state.reviewTimeMs = snapshot.timeMs;
+  state.reviewPrerollMs = getReplayPrerollDuration(solve);
+  renderReviewSnapshot(snapshot, solve, eligibility);
+}
+
+function updateReviewPrerollAtTime(prerollMs) {
+  const solve = getReviewSolve();
+  if (!solve) return;
+  const snapshot = createReplayPrerollSnapshot(solve, prerollMs);
+  const eligibility = getReplayEligibility(solve);
+  state.reviewPhase = 'preroll';
+  state.reviewPrerollMs = snapshot.prerollMs;
+  state.reviewTimeMs = 0;
+  renderReviewSnapshot(snapshot, solve, eligibility);
+}
+
+function renderReviewSnapshot(snapshot, solve, eligibility) {
+  els.reviewScrubber.max = Math.max(0, Math.round(solve.durationMs || 0));
+  els.reviewScrubber.value = Math.round(snapshot.timeMs);
+  els.reviewTimeLabel.textContent = `${formatTime(snapshot.timeMs)} / ${formatTime(solve.durationMs || 0)}`;
+  els.reviewMoveLabel.textContent = snapshot.phase === 'preroll'
+    ? `START · before move 1`
+    : snapshot.currentMove
+    ? `Move ${snapshot.moveNumber} of ${solve.moves.length} · ${snapshot.currentMove}`
+    : `Move 0 of ${solve.moves.length}`;
+  els.reviewMeta.textContent = `${getSolveProfileName(solve)} · ${new Date(solve.createdAt).toLocaleString()}`;
+
+  if (state.reviewPlayer && eligibility.ok) state.reviewPlayer.timestamp = snapshot.visualizerTimeMs;
+  updateReviewMoveHighlight(snapshot.moveIndex);
+  updateReviewButtons();
+}
+
+function resetReviewToStart(solve = getReviewSolve()) {
+  const prerollDurationMs = getReplayPrerollDuration(solve);
+  state.reviewPhase = prerollDurationMs > 0 ? 'preroll' : 'recorded';
+  state.reviewPrerollMs = 0;
+  state.reviewTimeMs = 0;
+}
+
+function updateReviewButtons() {
+  const solve = getReviewSolve();
+  const eligibility = getReplayEligibility(solve);
+  const disabled = !solve || !eligibility.ok;
+  els.reviewPlayBtn.disabled = disabled;
+  els.reviewRestartBtn.disabled = disabled;
+  els.reviewPrevBtn.disabled = disabled;
+  els.reviewNextBtn.disabled = disabled;
+  els.reviewStopBtn.disabled = disabled;
+  els.reviewScrubber.disabled = disabled;
+  els.reviewSpeedSelect.disabled = disabled;
+  els.reviewPlayBtn.textContent = state.reviewPlaying ? '❚❚ Pause' : '▶ Play';
+}
+
+function playReview() {
+  const solve = getReviewSolve();
+  if (!solve || !getReplayEligibility(solve).ok) return;
+  if (state.reviewTimeMs >= Number(solve.durationMs || 0)) {
+    resetReviewToStart(solve);
+    if (state.reviewPhase === 'preroll') updateReviewPrerollAtTime(0);
+    else updateReviewAtTime(0);
+  }
+  state.reviewPlaying = true;
+  state.reviewLastFrameAt = performance.now();
+  updateReviewButtons();
+  state.reviewAnimationHandle = requestAnimationFrame(tickReview);
+}
+
+function pauseReview() {
+  state.reviewPlaying = false;
+  state.reviewLastFrameAt = null;
+  cancelAnimationFrame(state.reviewAnimationHandle);
+  updateReviewButtons();
+}
+
+function tickReview(frameAt) {
+  if (!state.reviewPlaying) return;
+  const solve = getReviewSolve();
+  if (!solve) return pauseReview();
+  const delta = frameAt - (state.reviewLastFrameAt || frameAt);
+  state.reviewLastFrameAt = frameAt;
+  if (state.reviewPhase === 'preroll') {
+    const nextPrerollMs = advanceReplayPreroll(state.reviewPrerollMs, delta, state.reviewSpeed, solve);
+    updateReviewPrerollAtTime(nextPrerollMs);
+    if (nextPrerollMs >= getReplayPrerollDuration(solve)) updateReviewAtTime(0);
+    state.reviewAnimationHandle = requestAnimationFrame(tickReview);
+    return;
+  }
+
+  const nextTime = advanceReplayClock(state.reviewTimeMs, delta, state.reviewSpeed, solve.durationMs);
+  updateReviewAtTime(nextTime);
+  if (nextTime >= Number(solve.durationMs || 0)) pauseReview();
+  else state.reviewAnimationHandle = requestAnimationFrame(tickReview);
+}
+
+function jumpReviewToMove(offset) {
+  const solve = getReviewSolve();
+  if (!solve) return;
+  pauseReview();
+  if (state.reviewPhase === 'preroll') {
+    if (offset > 0) updateReviewAtTime(timeForMoveIndex(solve.moves, 0));
+    else updateReviewPrerollAtTime(0);
+    return;
+  }
+  const currentIndex = createReplaySnapshot(solve, state.reviewTimeMs).moveIndex;
+  if (currentIndex <= 0 && offset < 0) {
+    resetReviewToStart(solve);
+    if (state.reviewPhase === 'preroll') updateReviewPrerollAtTime(0);
+    else updateReviewAtTime(0);
+    return;
+  }
+  updateReviewAtTime(timeForMoveIndex(solve.moves, currentIndex + offset));
+}
+
+function renderReviewMoveStrip(solve) {
+  els.reviewMoveStrip.innerHTML = solve.moves.map((move, index) => `
+    <button class="review-move-token" type="button" data-review-index="${index}">
+      <small>${index + 1}</small><span>${escapeHtml(move.move)}</span>
+    </button>
+  `).join('');
+  els.reviewMoveStrip.querySelectorAll('[data-review-index]').forEach(button => {
+    button.addEventListener('click', () => {
+      pauseReview();
+      updateReviewAtTime(timeForMoveIndex(solve.moves, Number(button.dataset.reviewIndex)));
+    });
+  });
+}
+
+function updateReviewMoveHighlight(moveIndex) {
+  els.reviewMoveStrip.querySelectorAll('[data-review-index]').forEach(button => {
+    button.classList.toggle('active', Number(button.dataset.reviewIndex) === moveIndex);
+  });
+  const active = els.reviewMoveStrip.querySelector('.review-move-token.active');
+  active?.scrollIntoView({ behavior: state.reviewPlaying ? 'smooth' : 'auto', inline: 'center', block: 'nearest' });
+}
+
+function renderReviewStats(solve) {
+  els.reviewStats.innerHTML = `
+    <div><span>Total time</span><strong>${formatTime(solve.durationMs)}</strong></div>
+    <div><span>Moves</span><strong>${solve.stats.moveCount}</strong></div>
+    <div><span>TPS</span><strong>${solve.stats.tps.toFixed(2)}</strong></div>
+    <div><span>Longest pause</span><strong>${solve.stats.longestPause ? shortTime(solve.stats.longestPause) : '—'}</strong></div>
+    <div><span>Pauses &gt; 2s</span><strong>${solve.stats.pausesOver2}</strong></div>
+  `;
+}
+
 function detectBluetoothSupport() {
   const supported = 'bluetooth' in navigator;
   const secure = window.isSecureContext;
@@ -766,6 +1064,7 @@ function startOnFirstMove() {
   state.armed = false;
   state.running = true;
   state.solveProfileId = state.activeProfileId;
+  state.solveStartFacelets = captureStartFacelets(state.hasLiveFacelets, state.currentFacelets);
   state.trackedStage = state.hasLiveFacelets ? detectAtlasStage(state.currentFacelets) : null;
   state.startedAt = now();
   els.recordingState.textContent = 'RECORDING';
@@ -855,6 +1154,7 @@ function finishSolve(reason = 'manual') {
   const solve = {
     id: crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`,
     profileId: solveProfileId,
+    startFacelets: state.solveStartFacelets,
     createdAt: new Date().toISOString(),
     reason,
     deviceName: state.deviceName || (state.demoRunning ? 'Demo cube' : 'Unknown'),
@@ -873,7 +1173,10 @@ function finishSolve(reason = 'manual') {
   els.armBtn.textContent = 'Arm another';
   els.armBtn.disabled = false;
   els.finishBtn.disabled = true;
+  els.reviewSolveBtn.hidden = false;
+  els.reviewSolveBtn.dataset.solveId = solve.id;
   state.solveProfileId = null;
+  state.solveStartFacelets = null;
   state.trackedStage = null;
   state.demoRunning = false;
   logDiagnostic('Solve saved', { reason, durationMs: Math.round(durationMs), moves: stats.moveCount });
@@ -887,6 +1190,7 @@ function resetCurrentSolve(resetUi = true) {
   state.armed = false;
   state.running = false;
   state.solveProfileId = null;
+  state.solveStartFacelets = null;
   state.trackedStage = null;
   state.startedAt = null;
   state.moves = [];
@@ -900,6 +1204,8 @@ function resetCurrentSolve(resetUi = true) {
   els.longestPause.textContent = '—';
   els.pauseCount.textContent = '0';
   els.liveMove.textContent = '—';
+  els.reviewSolveBtn.hidden = true;
+  delete els.reviewSolveBtn.dataset.solveId;
   updateMoveStream();
   updateStageRecognition();
   if (resetUi) {
@@ -926,11 +1232,15 @@ function renderHistory() {
         <small>${new Date(solve.createdAt).toLocaleString()}</small>
       </span>
       <span class="history-meta">${solve.stats.moveCount} moves<br>${solve.stats.tps.toFixed(2)} TPS</span>
+      <span class="history-actions"><span class="review-link">Review</span></span>
     </button>
   `).join('');
 
   els.historyList.querySelectorAll('[data-solve-id]').forEach(button => {
-    button.addEventListener('click', () => selectReplay(button.dataset.solveId));
+    button.addEventListener('click', event => {
+      selectReplay(button.dataset.solveId);
+      if (event.target.closest('.history-actions')) openSolveReplay(button.dataset.solveId);
+    });
   });
 }
 
@@ -1071,6 +1381,10 @@ els.resetCubeBtn.addEventListener('click', resetCubeState);
 els.demoBtn.addEventListener('click', runDemo);
 els.armBtn.addEventListener('click', armSolve);
 els.finishBtn.addEventListener('click', () => finishSolve('manual'));
+els.reviewSolveBtn.addEventListener('click', () => {
+  const solveId = els.reviewSolveBtn.dataset.solveId;
+  if (solveId) openSolveReplay(solveId);
+});
 els.resetBtn.addEventListener('click', () => {
   resetCurrentSolve();
   logDiagnostic('Current solve reset');
@@ -1094,6 +1408,35 @@ els.cancelProfileBtn.addEventListener('click', closeProfileForm);
 els.profileModal.addEventListener('click', event => {
   if (event.target === els.profileModal) closeProfileForm();
 });
+els.closeReplayBtn.addEventListener('click', closeSolveReplay);
+els.replayModal.addEventListener('click', event => {
+  if (event.target === els.replayModal) closeSolveReplay();
+});
+els.reviewPlayBtn.addEventListener('click', () => {
+  if (state.reviewPlaying) pauseReview();
+  else playReview();
+});
+els.reviewRestartBtn.addEventListener('click', () => {
+  pauseReview();
+  resetReviewToStart();
+  if (state.reviewPhase === 'preroll') updateReviewPrerollAtTime(0);
+  else updateReviewAtTime(0);
+});
+els.reviewPrevBtn.addEventListener('click', () => jumpReviewToMove(-1));
+els.reviewNextBtn.addEventListener('click', () => jumpReviewToMove(1));
+els.reviewStopBtn.addEventListener('click', () => {
+  pauseReview();
+  resetReviewToStart();
+  if (state.reviewPhase === 'preroll') updateReviewPrerollAtTime(0);
+  else updateReviewAtTime(0);
+});
+els.reviewSpeedSelect.addEventListener('change', event => {
+  state.reviewSpeed = Number(event.target.value) || 1;
+});
+els.reviewScrubber.addEventListener('input', event => {
+  pauseReview();
+  updateReviewAtTime(Number(event.target.value));
+});
 document.addEventListener('click', event => {
   if (!els.profileOptions.hidden && !event.target.closest('.profile-menu')) setProfileMenuOpen(false);
 });
@@ -1101,6 +1444,7 @@ document.addEventListener('keydown', event => {
   if (event.key === 'Escape') {
     setProfileMenuOpen(false);
     if (!els.profileModal.hidden) closeProfileForm();
+    if (!els.replayModal.hidden) closeSolveReplay();
   }
 });
 els.replaySlider.addEventListener('input', event => {
