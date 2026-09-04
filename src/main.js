@@ -12,6 +12,9 @@ const state = {
   battery: null,
   capabilities: null,
   currentFacelets: SOLVED_FACELETS,
+  cubeResetPending: false,
+  cubeResetSuppressSolvedUntil: 0,
+  cubeFeedbackTimer: null,
   armed: false,
   running: false,
   startedAt: null,
@@ -65,8 +68,10 @@ app.innerHTML = `
 
         <div class="button-row">
           <button class="primary" id="connectBtn">Connect cube</button>
+          <button class="secondary" id="resetCubeBtn" disabled>Reset cube</button>
           <button class="secondary" id="demoBtn">Run demo</button>
         </div>
+        <p class="cube-feedback" id="cubeFeedback">Connect a compatible cube to reset cube state.</p>
         <p class="fine-print">Bluetooth requires Chrome/Edge on a supported device and an HTTPS page. The connect button must be pressed by you.</p>
       </article>
 
@@ -168,6 +173,7 @@ app.innerHTML = `
 
 const els = Object.fromEntries([
   'browserBadge','statusDot','connectionStatus','batteryStatus','deviceStatus','connectBtn','demoBtn',
+  'resetCubeBtn','cubeFeedback',
   'cubeNet','liveMove','faceletText','recordingState','timer','moveCount','tps','longestPause','pauseCount',
   'armBtn','finishBtn','resetBtn','moveStream','historyList','clearHistoryBtn','replayMove','replayTime',
   'replaySlider','replaySequence','analysisPreview','diagnosticLog','copyDiagnosticsBtn','clearDiagnosticsBtn'
@@ -221,6 +227,48 @@ function setConnectionUi(mode, message) {
   else if (mode === 'connecting') els.connectBtn.textContent = 'Connecting…';
   else els.connectBtn.textContent = 'Connect cube';
   els.connectBtn.disabled = mode === 'connecting' || mode === 'connected';
+  updateResetControls();
+}
+
+function supportsCubeReset() {
+  if (!state.connected || !state.connection?.sendCommand) return false;
+  return !state.capabilities || state.capabilities.reset !== false;
+}
+
+function setCubeFeedback(message, clearAfterMs = 0) {
+  clearTimeout(state.cubeFeedbackTimer);
+  els.cubeFeedback.textContent = message;
+  if (clearAfterMs) {
+    state.cubeFeedbackTimer = setTimeout(() => {
+      els.cubeFeedback.textContent = '';
+      updateResetControls();
+    }, clearAfterMs);
+  }
+}
+
+function updateResetControls() {
+  const hasConnection = Boolean(state.connected && state.connection);
+  const hasReset = supportsCubeReset();
+  els.resetCubeBtn.disabled = !hasConnection || !hasReset || state.cubeResetPending;
+  if (state.cubeResetPending) {
+    els.resetCubeBtn.textContent = 'Resetting…';
+    els.resetCubeBtn.title = 'Waiting for the cube reset command to complete.';
+    setCubeFeedback('Resetting…');
+  } else {
+    els.resetCubeBtn.textContent = 'Reset cube';
+    if (!hasConnection) {
+      els.resetCubeBtn.title = 'Connect a compatible cube before resetting cube state.';
+      els.cubeFeedback.textContent = 'Connect a compatible cube to reset cube state.';
+    } else if (!hasReset) {
+      els.resetCubeBtn.title = 'This connection reports that reset is unsupported.';
+      els.cubeFeedback.textContent = 'Cube reset is not supported by this connection.';
+    } else {
+      els.resetCubeBtn.title = 'Tell the connected cube that the current physical position is solved.';
+      if (!els.cubeFeedback.textContent || els.cubeFeedback.textContent.startsWith('Connect') || els.cubeFeedback.textContent.includes('not supported')) {
+        els.cubeFeedback.textContent = 'Ready to reset cube state when the physical cube is solved.';
+      }
+    }
+  }
 }
 
 function detectBluetoothSupport() {
@@ -272,6 +320,7 @@ async function connectCube() {
       complete: () => {
         logDiagnostic('Cube event stream closed');
         state.connected = false;
+        state.cubeResetPending = false;
         setConnectionUi('idle', 'Disconnected');
       }
     });
@@ -286,6 +335,7 @@ async function connectCube() {
     }
   } catch (error) {
     state.connected = false;
+    state.cubeResetPending = false;
     const cancelled = error?.name === 'NotFoundError';
     setConnectionUi('idle', cancelled ? 'Connection cancelled' : 'Could not connect');
     logDiagnostic(cancelled ? 'Device chooser cancelled' : 'Connection failed', {
@@ -311,7 +361,11 @@ function handleCubeEvent(event) {
         state.currentFacelets = normalizeFacelets(event.facelets);
         renderCube(state.currentFacelets);
         els.faceletText.textContent = state.currentFacelets;
-        if (state.running && state.moves.length > 0 && isSolvedFacelets(state.currentFacelets)) {
+        const suppressResetFinish = now() < state.cubeResetSuppressSolvedUntil;
+        if (suppressResetFinish && isSolvedFacelets(state.currentFacelets)) {
+          logDiagnostic('Solved-state finish suppressed after cube reset');
+        }
+        if (!suppressResetFinish && state.running && state.moves.length > 0 && isSolvedFacelets(state.currentFacelets)) {
           finishSolve('solved-state');
         }
       }
@@ -322,6 +376,50 @@ function handleCubeEvent(event) {
       break;
     default:
       break;
+  }
+}
+
+async function resetCubeState() {
+  if (!state.connected || !state.connection) {
+    logDiagnostic('Cube reset blocked: no cube connected');
+    setCubeFeedback('Connect a compatible cube before resetting.');
+    updateResetControls();
+    return;
+  }
+  if (!supportsCubeReset()) {
+    logDiagnostic('Cube reset unsupported', { capabilities: state.capabilities });
+    setCubeFeedback('Cube reset is not supported by this connection.');
+    updateResetControls();
+    return;
+  }
+
+  const confirmed = confirm(
+    'Reset cube state?\n\nOnly continue if the physical cube is completely solved.\n\nThis will tell the connected Rubik\'s Cube that its current physical position is the solved position.'
+  );
+  if (!confirmed) {
+    logDiagnostic('Cube reset cancelled');
+    return;
+  }
+
+  try {
+    state.cubeResetPending = true;
+    state.cubeResetSuppressSolvedUntil = now() + 5000;
+    updateResetControls();
+    logDiagnostic('Cube reset requested', { command: 'REQUEST_RESET', capabilities: state.capabilities });
+    await state.connection.sendCommand({ type: 'REQUEST_RESET' });
+    state.cubeResetPending = false;
+    setCubeFeedback('Cube reset', 1800);
+    updateResetControls();
+    logDiagnostic('Cube reset successful');
+  } catch (error) {
+    state.cubeResetPending = false;
+    setCubeFeedback('Cube reset failed');
+    updateResetControls();
+    logDiagnostic('Cube reset failure', { message: error?.message || String(error) });
+  } finally {
+    setTimeout(() => {
+      if (now() >= state.cubeResetSuppressSolvedUntil) state.cubeResetSuppressSolvedUntil = 0;
+    }, 5000);
   }
 }
 
@@ -644,6 +742,7 @@ function sleep(ms) {
 }
 
 els.connectBtn.addEventListener('click', connectCube);
+els.resetCubeBtn.addEventListener('click', resetCubeState);
 els.demoBtn.addEventListener('click', runDemo);
 els.armBtn.addEventListener('click', armSolve);
 els.finishBtn.addEventListener('click', () => finishSolve('manual'));
@@ -683,6 +782,7 @@ renderCube(SOLVED_FACELETS);
 renderHistory();
 renderReplay();
 detectBluetoothSupport();
+updateResetControls();
 
 if ('serviceWorker' in navigator && window.isSecureContext) {
   window.addEventListener('load', () => {

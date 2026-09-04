@@ -68,6 +68,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .small { padding: 8px 11px; font-size: 12px; }
 .text-btn { background: transparent; color: var(--muted); padding: 5px 0; font-size: 12px; }
 .fine-print { color: var(--muted); font-size: 11px; line-height: 1.5; margin: 14px 0 0; }
+.cube-feedback { color: #cbd0dc; font-size: 11px; line-height: 1.45; min-height: 16px; margin: 12px 0 0; }
 
 .cube-card { min-height: 320px; }
 .move-pill { min-width: 54px; text-align: center; padding: 9px 12px; border-radius: 10px; background: rgba(124,108,255,.12); border: 1px solid rgba(124,108,255,.28); color: #c5beff; font-weight: 900; }
