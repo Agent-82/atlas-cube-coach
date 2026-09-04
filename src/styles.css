@@ -101,6 +101,9 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .sticker.unknown { background: #30374a; }
 .facelet-readout { display: flex; gap: 8px; align-items: center; justify-content: center; color: var(--muted); font-size: 10px; }
 .facelet-readout code { max-width: 75%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #cbd0dc; }
+.stage-card { margin: 16px auto 0; padding: 14px; max-width: 360px; border: 1px solid rgba(124,108,255,.28); border-radius: 14px; background: rgba(8,11,18,.52); text-align: left; }
+.stage-card strong { display: block; margin-top: 7px; color: var(--text); font-size: 18px; line-height: 1.2; }
+.stage-card span:last-child { display: block; margin-top: 6px; color: var(--muted); font-size: 11px; line-height: 1.4; }
 
 .recorder-card { margin-top: 16px; text-align: center; }
 .rec-state { border: 1px solid var(--line); color: var(--muted); padding: 8px 10px; border-radius: 999px; font-size: 10px; font-weight: 900; letter-spacing: .08em; }

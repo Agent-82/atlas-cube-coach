@@ -1,5 +1,6 @@
 import './styles.css';
 import { connectSmartCube } from 'smartcube-web-bluetooth';
+import { detectAtlasStage } from './stageRecognition.js';
 
 const STORAGE_KEY = 'atlasCubeCoach.solves.v1';
 const PROFILES_KEY = 'atlasCubeCoach.profiles.v1';
@@ -36,6 +37,7 @@ const state = {
   battery: null,
   capabilities: null,
   currentFacelets: SOLVED_FACELETS,
+  hasLiveFacelets: false,
   cubeResetPending: false,
   cubeResetSuppressSolvedUntil: 0,
   cubeFeedbackTimer: null,
@@ -49,6 +51,9 @@ const state = {
   solves: initialData.solves,
   profiles: initialData.profiles,
   activeProfileId: initialData.activeProfileId,
+  trackedStage: null,
+  displayedStageKey: null,
+  stageRecognitionAvailableLogged: false,
   replaySolveId: null,
   replayIndex: -1,
   diagnostics: [],
@@ -61,7 +66,7 @@ app.innerHTML = `
   <main class="shell">
     <header class="hero">
       <div>
-        <p class="eyebrow">ATLAS LABS · PROTOTYPE 0.2 · PROFILES</p>
+        <p class="eyebrow">ATLAS LABS · PROTOTYPE 0.2B · STAGE RECOGNITION</p>
         <h1>Atlas Cube Coach</h1>
         <p class="lede">First make the cube talk. Then make the coaching clever.</p>
       </div>
@@ -121,6 +126,11 @@ app.innerHTML = `
         <div class="facelet-readout">
           <span>Facelets</span>
           <code id="faceletText">Waiting for cube…</code>
+        </div>
+        <div class="stage-card" id="stageCard">
+          <span class="section-kicker" id="stageKicker">CURRENT STAGE</span>
+          <strong id="stageText">Connect cube to detect stage</strong>
+          <span id="stageNote">Waiting for real cube facelets.</span>
         </div>
       </article>
     </section>
@@ -257,7 +267,8 @@ const els = Object.fromEntries([
   'profileExperienceInput','profileMethodInput','profileHelpInput','profileFormError','cancelProfileBtn',
   'statusDot','connectionStatus','batteryStatus','deviceStatus','connectBtn','demoBtn',
   'resetCubeBtn','cubeFeedback',
-  'cubeNet','liveMove','faceletText','recordingState','timer','moveCount','tps','longestPause','pauseCount',
+  'cubeNet','liveMove','faceletText','stageCard','stageKicker','stageText','stageNote',
+  'recordingState','timer','moveCount','tps','longestPause','pauseCount',
   'armBtn','finishBtn','resetBtn','moveStream','historyList','clearHistoryBtn','replayMove','replayTime',
   'replaySlider','replaySequence','analysisPreview','diagnosticLog','copyDiagnosticsBtn','clearDiagnosticsBtn'
 ].map(id => [id, document.getElementById(id)]));
@@ -328,6 +339,10 @@ function createProfileId(name) {
 
 function getActiveProfile() {
   return state.profiles.find(profile => profile.id === state.activeProfileId) || state.profiles[0];
+}
+
+function getProfileById(profileId) {
+  return state.profiles.find(profile => profile.id === profileId);
 }
 
 function getVisibleSolves() {
@@ -449,6 +464,7 @@ function switchProfile(profileId) {
   renderProfileMenu();
   renderHistory();
   renderReplay();
+  updateStageRecognition();
   logDiagnostic('Profile switched', { profileId, name: getActiveProfile()?.name });
 }
 
@@ -498,7 +514,70 @@ function addProfile(event) {
   renderProfileMenu();
   renderHistory();
   renderReplay();
+  updateStageRecognition();
   logDiagnostic('Profile added', { profileId: profile.id, name: profile.name });
+}
+
+function getStageRecognitionProfile() {
+  if (state.running && state.solveProfileId) return getProfileById(state.solveProfileId) || getActiveProfile();
+  return getActiveProfile();
+}
+
+function isAtlasBeginnerProfile(profile) {
+  return profile?.method === 'Atlas 8-step beginner';
+}
+
+function setStageDisplay(kicker, text, note, key) {
+  els.stageKicker.textContent = kicker;
+  els.stageText.textContent = text;
+  els.stageNote.textContent = note;
+  state.displayedStageKey = key;
+}
+
+function updateStageRecognition() {
+  if (!state.hasLiveFacelets) {
+    setStageDisplay('CURRENT STAGE', 'Connect cube to detect stage', 'Waiting for real cube facelets.', 'waiting');
+    return;
+  }
+
+  const profile = getStageRecognitionProfile();
+  if (!isAtlasBeginnerProfile(profile)) {
+    setStageDisplay(
+      'CURRENT STAGE',
+      'Stage recognition unavailable',
+      'Stage recognition is currently available for the Atlas 8-step beginner method.',
+      'unsupported-method'
+    );
+    return;
+  }
+
+  const detectedStage = detectAtlasStage(state.currentFacelets);
+  let displayStage = detectedStage;
+  if (state.running) {
+    if (!state.trackedStage) state.trackedStage = detectedStage;
+    else if (detectedStage.index > state.trackedStage.index) state.trackedStage = detectedStage;
+    displayStage = state.trackedStage;
+  }
+
+  const previousKey = state.displayedStageKey;
+  setStageDisplay(displayStage.key === 'solved' ? 'SOLVED' : 'CURRENT STAGE', displayStage.display, profile.name, displayStage.key);
+
+  if (!state.stageRecognitionAvailableLogged) {
+    state.stageRecognitionAvailableLogged = true;
+    logDiagnostic('Live stage recognition available', { profile: profile.name, stage: displayStage.display });
+  }
+  if (previousKey && previousKey !== displayStage.key && displayStage.index > stageIndexForKey(previousKey)) {
+    logDiagnostic('Stage advanced', { from: previousKey, to: displayStage.display });
+  }
+  if (previousKey !== displayStage.key && displayStage.key === 'solved') {
+    logDiagnostic('Cube reached Solved');
+  }
+}
+
+function stageIndexForKey(key) {
+  if (key === 'solved') return 9;
+  const match = /^step-(\d+)$/.exec(String(key));
+  return match ? Number(match[1]) : 0;
 }
 
 function detectBluetoothSupport() {
@@ -588,9 +667,13 @@ function handleCubeEvent(event) {
       break;
     case 'FACELETS':
       if (event.facelets) {
+        const firstLiveFacelets = !state.hasLiveFacelets;
+        state.hasLiveFacelets = true;
         state.currentFacelets = normalizeFacelets(event.facelets);
         renderCube(state.currentFacelets);
         els.faceletText.textContent = state.currentFacelets;
+        updateStageRecognition();
+        if (firstLiveFacelets) logDiagnostic('Live facelets received');
         const suppressResetFinish = now() < state.cubeResetSuppressSolvedUntil;
         if (suppressResetFinish && isSolvedFacelets(state.currentFacelets)) {
           logDiagnostic('Solved-state finish suppressed after cube reset');
@@ -683,12 +766,14 @@ function startOnFirstMove() {
   state.armed = false;
   state.running = true;
   state.solveProfileId = state.activeProfileId;
+  state.trackedStage = state.hasLiveFacelets ? detectAtlasStage(state.currentFacelets) : null;
   state.startedAt = now();
   els.recordingState.textContent = 'RECORDING';
   els.recordingState.className = 'rec-state recording';
   els.finishBtn.disabled = false;
   els.timer.classList.add('running');
   state.timerHandle = requestAnimationFrame(tickTimer);
+  updateStageRecognition();
   logDiagnostic('Solve started on first move');
 }
 
@@ -789,17 +874,20 @@ function finishSolve(reason = 'manual') {
   els.armBtn.disabled = false;
   els.finishBtn.disabled = true;
   state.solveProfileId = null;
+  state.trackedStage = null;
   state.demoRunning = false;
   logDiagnostic('Solve saved', { reason, durationMs: Math.round(durationMs), moves: stats.moveCount });
 
   renderHistory();
   selectReplay(solve.id);
+  updateStageRecognition();
 }
 
 function resetCurrentSolve(resetUi = true) {
   state.armed = false;
   state.running = false;
   state.solveProfileId = null;
+  state.trackedStage = null;
   state.startedAt = null;
   state.moves = [];
   state.lastMove = null;
@@ -813,6 +901,7 @@ function resetCurrentSolve(resetUi = true) {
   els.pauseCount.textContent = '0';
   els.liveMove.textContent = '—';
   updateMoveStream();
+  updateStageRecognition();
   if (resetUi) {
     els.recordingState.textContent = 'IDLE';
     els.recordingState.className = 'rec-state';
@@ -1037,6 +1126,7 @@ renderCube(SOLVED_FACELETS);
 renderProfileMenu();
 renderHistory();
 renderReplay();
+updateStageRecognition();
 detectBluetoothSupport();
 updateResetControls();
 
